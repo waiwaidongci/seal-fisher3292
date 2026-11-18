@@ -6,8 +6,32 @@ from src.config.domain import DOMAIN
 from src.models.user import User
 from src.models.study import Study
 from src.models.observation import Observation
-from src.models import run,review,audit
+from src.models import run,review,audit,staged
 from src.utils.security import hash_password
+from types import SimpleNamespace
+from fastapi import HTTPException
+from src.schemas.staged import StagedLookInput,StagedPlanInput
+from src.services import staged_plans
+
+
+def seed_staged_plan(db,study,name,looks,total_alpha,admitted):
+    """Create a demo plan through the real service rules, once, then leave it alone."""
+    if db.scalar(select(staged.StagedPlan).where(staged.StagedPlan.study_id==study.id,staged.StagedPlan.name==name)):
+        return None
+    user=SimpleNamespace(email='admin@demo.local')
+    payload=StagedPlanInput(study_id=study.id,name=name,looks=[{'n':n,'alpha':a} for n,a in looks],total_alpha=total_alpha)
+    try:
+        plan=staged_plans.create(db,payload,user)
+    except HTTPException:
+        return None
+    for number,values in admitted:
+        a_success,a_failure,b_success,b_failure=values
+        look=StagedLookInput(look=number,arm_a_success=a_success,arm_a_failure=a_failure,
+            arm_b_success=b_success,arm_b_failure=b_failure,
+            idempotency_key=f'seed-demo-{plan["id"]}-{number}',note='')
+        result=staged_plans.admit(db,plan['id'],look,user)
+        if result['status']!='active': break
+    return plan
 
 def seed():
     Base.metadata.create_all(engine)
@@ -37,7 +61,13 @@ def seed():
                 key=f'DEMO-{k+1}-{n+1:04}'
                 if not db.scalar(select(Observation.id).where(Observation.study_id==study.id,Observation.source_key==key)):
                     db.add(Observation(study_id=study.id,source_key=key,values=values))
+            if i==1 and k==0:
+                seed_staged_plan(db,study,'砚田·薄膜分阶段三轮',[(4,'0.02'),(8,'0.02'),(12,'0.02')],'0.05',
+                    [(1,(3,1,3,1)),(2,(4,0,1,3))])
+            if i==1 and k==1:
+                seed_staged_plan(db,study,'砚田·覆膜分阶段两轮',[(6,'0.03'),(12,'0.03')],'0.05',
+                    [(1,(5,1,0,6))])
         db.commit()
-        counts={model.__tablename__:db.scalar(select(func.count()).select_from(model)) for model in (User,Study,Observation)}
+        counts={model.__tablename__:db.scalar(select(func.count()).select_from(model)) for model in (User,Study,Observation,staged.StagedPlan,staged.StagedLook)}
         print(json.dumps(counts));return counts
 if __name__=='__main__': seed()
